@@ -2,7 +2,9 @@ import os
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from typing import Optional
+from typing import Optional, List
+from pydantic import BaseModel
+import csv
 
 app = FastAPI()
 
@@ -62,6 +64,48 @@ async def upload_files(
         saved["csv"] = await _save(csv, "csv")
 
     return {"status": "ok", "files": saved}
+
+class CsvPreviewRequest(BaseModel):
+    filename: str  # must be the stored_as name returned from upload
+    delimiter: Optional[str] = None  # auto-detect if not provided
+    max_lines: int = 10
+
+class CsvPreviewResponse(BaseModel):
+    filename: str
+    delimiter: str
+    headers: List[str]
+    rows: List[List[str]]
+    total_preview_rows: int
+
+@app.post("/api/csv/preview", response_model=CsvPreviewResponse)
+def csv_preview(req: CsvPreviewRequest):
+    path = os.path.join(UPLOAD_DIR, os.path.basename(req.filename))
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="CSV file not found")
+
+    # Read small preview, preserve verbatim cells (no casting)
+    with open(path, "r", newline="", encoding="utf-8") as f:
+        sample = f.read(8192)
+        f.seek(0)
+        dialect = csv.Sniffer().sniff(sample) if not req.delimiter else csv.excel
+        delimiter = req.delimiter or dialect.delimiter
+        reader = csv.reader(f, delimiter=delimiter)
+        try:
+            headers = next(reader)
+        except StopIteration:
+            headers = []
+        rows: List[List[str]] = []
+        for i, row in enumerate(reader):
+            if i >= req.max_lines:
+                break
+            rows.append(row)
+    return CsvPreviewResponse(
+        filename=os.path.basename(req.filename),
+        delimiter=delimiter,
+        headers=headers,
+        rows=rows,
+        total_preview_rows=len(rows),
+    )
 
 @app.get("/test")
 def test_database():
